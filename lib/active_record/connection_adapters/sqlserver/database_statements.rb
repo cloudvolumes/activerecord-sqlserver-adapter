@@ -171,11 +171,17 @@ module ActiveRecord
                  else
                    variables.map { |v| quote(v) }
                  end.join(", ")
+
           sql = "EXEC #{proc_name} #{vars}".strip
 
-          log(sql, "Execute Procedure") do |notification_payload|
+          log(sql, "Execute Procedure") do |notification_payload|            
             with_raw_connection do |conn|
-              result = internal_raw_execute(sql, conn)
+              if odbc_connection?(conn)
+                result = execute_odbc_procedure(sql, conn)
+              else
+                result = internal_raw_execute(sql, conn)
+              end
+
               verified!
               options = { as: :hash, cache_rows: true, timezone: ActiveRecord.default_timezone || :utc }
 
@@ -435,7 +441,45 @@ module ActiveRecord
           finish_statement_handle(handle)
         end
 
+        def execute_odbc_procedure(sql, conn)
+          results = []
+          raw_connection_run(sql, conn) do |handle|
+            get_rows = lambda do
+              rows = handle_to_names_and_values(handle, fetch: :all)
+              rows.each_with_index { |r, i| rows[i] = r.with_indifferent_access }
+              results << rows
+            end
+            get_rows.call
+            get_rows.call while handle_more_results?(handle)
+          end
+          results.many? ? results : results.first
+        end
+
+        # Wrapper for raw_connection's run method
+        def raw_connection_run(sql, conn)
+          conn.raw_connection.run(sql) do |handle|
+            yield(handle)
+          end
+        end
+        
+        def handle_more_results?(handle)
+          case @connection_options[:mode]
+          when :dblib
+          when :odbc
+            handle.more_results
+          end
+        end
+
         def handle_to_names_and_values(handle, options = {})
+          case @connection_options[:mode]
+          when :dblib
+            handle_to_names_and_values_dblib(handle, options)
+          when :odbc
+            handle_to_names_and_values_odbc(handle, options)
+          end
+        end
+
+        def handle_to_names_and_values_dblib(handle, options = {})
           query_options = {}.tap do |qo|
             qo[:timezone] = ActiveRecord.default_timezone || :utc
             qo[:as] = (options[:ar_result] || options[:fetch] == :rows) ? :array : :hash
@@ -450,8 +494,29 @@ module ActiveRecord
           options[:ar_result] ? ActiveRecord::Result.new(columns, results) : results
         end
 
+        def handle_to_names_and_values_odbc(handle, options = {})
+          @connection.use_utc = ActiveRecord::Base.default_timezone == :utc
+          if options[:ar_result]
+            columns = lowercase_schema_reflection ? handle.columns(true).map { |c| c.name.downcase } : handle.columns(true).map { |c| c.name }
+            rows = handle.fetch_all || []
+            ActiveRecord::Result.new(columns, rows)
+          else
+            case options[:fetch]
+            when :all
+              handle.each_hash || []
+            when :rows
+              handle.fetch_all || []
+            end
+          end
+        end
+
         def finish_statement_handle(handle)
-          handle.cancel if handle
+          case @connection_options[:mode]
+          when :dblib
+            handle.cancel if handle
+          when :odbc
+            handle.drop if handle && handle.respond_to?(:drop) && !handle.finished?
+          end
           handle
         end
 
@@ -459,11 +524,19 @@ module ActiveRecord
         # Getting around this by raising an exception ourselves while PR
         # https://github.com/rails-sqlserver/tiny_tds/pull/469 is not released.
         def internal_raw_execute(sql, conn, perform_do: false)
-          result = conn.execute(sql).tap do |_result|
-            raise TinyTds::Error, "failed to execute statement" if _result.is_a?(FalseClass)
-          end
+          if odbc_connection?(conn)
+            conn.do(sql)
+          else
+            result = conn.execute(sql).tap do |_result|
+              raise TinyTds::Error, "failed to execute statement" if _result.is_a?(FalseClass)
+            end
 
-          perform_do ? result.do : result
+            perform_do ? result.do : result
+          end
+        end
+
+        def odbc_connection?(conn)
+          conn.adapter_name.downcase.include?("odbc")
         end
       end
     end

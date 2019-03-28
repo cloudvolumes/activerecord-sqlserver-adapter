@@ -5,24 +5,25 @@ require "rake/testtask"
 require_relative "test/support/paths_sqlserver"
 require_relative "test/support/rake_helpers"
 
-task test: ["test:dblib"]
+task test: ["test:dblib", "test:odbc"]
 task default: [:test]
 
 namespace :test do
-  ENV["ARCONN"] = "sqlserver"
+  ENV["ARCONN"] ||= "sqlserver"
 
-  %w(dblib).each do |mode|
+  %w(dblib odbc).each do |mode|
     Rake::TestTask.new(mode) do |t|
       t.libs = ARTest::SQLServer.test_load_paths
       t.test_files = test_files
       t.warning = !!ENV["WARNING"]
       t.verbose = false
+      ENV["SQLSERVER_MODE"] = mode
     end
   end
 end
 
 namespace :profile do
-  ["dblib"].each do |mode|
+  %w(dblib odbc).each do |mode|
     namespace mode.to_sym do
       Dir.glob("test/profile/*_profile_case.rb").sort.each do |test_file|
         profile_case = File.basename(test_file).sub("_profile_case.rb", "")
@@ -30,6 +31,7 @@ namespace :profile do
           t.libs = ARTest::SQLServer.test_load_paths
           t.test_files = [test_file]
           t.verbose = true
+          ENV["SQLSERVER_MODE"] = mode
         end
       end
     end

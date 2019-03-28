@@ -1,4 +1,14 @@
+## v7.2.4.odbc
+
+#### Added
+
+- ODBC restoration.
+
 ## v7.2.4
+
+#### Changed
+
+- [#1073](https://github.com/rails-sqlserver/activerecord-sqlserver-adapter/pull/1073) Improve performance of view default function lookup
 
 #### Fixed
 
