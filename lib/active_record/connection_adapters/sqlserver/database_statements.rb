@@ -288,9 +288,11 @@ module ActiveRecord
                     end
 
                     <<~SQL.squish
+                      SET NOCOUNT ON
                       DECLARE @ssaIdInsertTable table (#{pk_and_types.map { |pk_and_type| "#{pk_and_type[:quoted]} #{pk_and_type[:id_sql_type]}"}.join(", ") });
                       #{sql.dup.insert sql.index(/ (DEFAULT )?VALUES/i), " OUTPUT #{ pk_and_types.map { |pk_and_type| "INSERTED.#{pk_and_type[:quoted]}" }.join(", ") } INTO @ssaIdInsertTable"}
                       SELECT #{pk_and_types.map {|pk_and_type| "CAST(#{pk_and_type[:quoted]} AS #{pk_and_type[:id_sql_type]}) #{pk_and_type[:quoted]}"}.join(", ")} FROM @ssaIdInsertTable
+                      SET NOCOUNT OFF
                     SQL
                   else
                     returning_columns = returning || Array(pk)
