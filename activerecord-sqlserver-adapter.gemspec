@@ -29,4 +29,5 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "activerecord", "~> 8.0.0"
   spec.add_dependency "tiny_tds"
+  spec.add_dependency "ruby-odbc"
 end
