@@ -2,6 +2,7 @@
 
 require "base64"
 require "active_record"
+require "odbc_utf8"
 require "arel_sqlserver"
 require "active_record/connection_adapters/abstract_adapter"
 require "active_record/connection_adapters/sqlserver/core_ext/active_record"
@@ -77,10 +78,12 @@ module ActiveRecord
         end
 
         def new_client(config)
-          case config[:mode]
+          case config[:mode].to_sym
           when :dblib
             require "tiny_tds"
             dblib_connect(config)
+          when :odbc
+            odbc_connect(config)
           else
             raise ArgumentError, "Unknown connection mode in #{config.inspect}."
           end
@@ -121,6 +124,25 @@ module ActiveRecord
           raise e
         end
 
+        def odbc_connect(config)
+          if config[:dsn].include?(';')
+            driver = ODBC::Driver.new.tap do |d|
+              d.name = config[:dsn_name] || 'Driver1'
+              d.attrs = config[:dsn].split(';').map { |atr| atr.split('=') }.reject { |kv| kv.size != 2 }.reduce({}) { |a, e| k, v = e ; a[k] = v ; a }
+            end
+            ODBC::Database.new.drvconnect(driver)
+          else
+            ODBC.connect config[:dsn], config[:username], config[:password]
+          end.tap do |c|
+            begin
+              c.use_time = true
+              c.use_utc = ActiveRecord.default_timezone == :utc
+            rescue Exception
+              warn 'Ruby ODBC v0.99992 or higher is required.'
+            end
+          end
+        end
+
         def config_appname(config)
           if instance_methods.include?(:configure_application_name)
             ActiveSupport::Deprecation.warn <<~MSG.squish
@@ -155,6 +177,7 @@ module ActiveRecord
       end
 
       def initialize(connection, logger, _connection_options, config)
+        config[:mode] = config[:mode].to_s.downcase.underscore.to_sym
         super(connection, logger, config)
         @connection_options = config
         perform_connection_configuration
@@ -302,6 +325,8 @@ module ActiveRecord
         case @connection_options[:mode]
         when :dblib
           @connection.close rescue nil
+        when :odbc
+          @connection.disconnect rescue nil
         end
         @connection = nil
         @spid = nil
@@ -512,11 +537,45 @@ module ActiveRecord
 
       # === SQLServer Specific (Connection Management) ================ #
 
+      # def connect
+      #   config = @connection_options
+      #   @connection = case config[:mode]
+      #                 when :dblib
+      #                   dblib_connect(config)
+      #                 when :odbc
+      #                   odbc_connect(config)
+      #                 end
+      #   @spid = _raw_select("SELECT @@SPID", fetch: :rows).first.first
+      #   @version_year = version_year
+      #   configure_connection
+      # end
+
       def connection_errors
         @connection_errors ||= [].tap do |errors|
           errors << TinyTds::Error if defined?(TinyTds::Error)
+          errors << ODBC::Error if defined?(ODBC::Error)
         end
       end
+
+      def config_appname(config)
+        config[:appname] || configure_application_name || Rails.application.class.name.split("::").first rescue nil
+      end
+
+      def config_login_timeout(config)
+        config[:login_timeout].present? ? config[:login_timeout].to_i : nil
+      end
+
+      def config_timeout(config)
+        config[:timeout].present? ? config[:timeout].to_i / 1000 : nil
+      end
+
+      def config_encoding(config)
+        config[:encoding].present? ? config[:encoding] : nil
+      end
+
+      def configure_connection; end
+
+      def configure_application_name; end
 
       def initialize_dateformatter
         @database_dateformat = user_options_dateformat
