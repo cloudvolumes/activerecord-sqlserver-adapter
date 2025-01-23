@@ -276,7 +276,13 @@ module ActiveRecord
       end
 
       def reconnect
-        @raw_connection&.close rescue nil
+        case @config[:mode].to_sym
+        when :dblib
+          @raw_connection&.close rescue nil
+        when :odbc
+          @raw_connection.disconnect rescue nil
+        end
+
         @raw_connection = nil
         @spid = nil
         @collation = nil
@@ -287,7 +293,7 @@ module ActiveRecord
       def disconnect!
         super
 
-        case @connection_options[:mode]
+        case @config[:mode].to_sym
         when :dblib
           @raw_connection&.close rescue nil
         when :odbc

@@ -463,7 +463,7 @@ module ActiveRecord
         end
         
         def handle_more_results?(handle)
-          case @connection_options[:mode]
+          case @config[:mode].to_sym
           when :dblib
           when :odbc
             handle.more_results
@@ -471,7 +471,7 @@ module ActiveRecord
         end
 
         def handle_to_names_and_values(handle, options = {})
-          case @connection_options[:mode]
+          case @config[:mode].to_sym
           when :dblib
             handle_to_names_and_values_dblib(handle, options)
           when :odbc
@@ -511,7 +511,7 @@ module ActiveRecord
         end
 
         def finish_statement_handle(handle)
-          case @connection_options[:mode]
+          case @config[:mode].to_sym
           when :dblib
             handle.cancel if handle
           when :odbc
