@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require "tiny_tds"
 require "base64"
 require "active_record"
 require "odbc_utf8"
