@@ -16,7 +16,7 @@ module ActiveRecord
         def raw_execute(sql, name, async: false, allow_retry: false, materialize_transactions: true)
           log(sql, name, async: async) do |notification_payload|
             with_raw_connection(allow_retry: allow_retry, materialize_transactions: materialize_transactions) do |conn|
-              result = if id_insert_table_name = query_requires_identity_insert?(sql)
+              result = if (id_insert_table_name = query_requires_identity_insert?(sql))
                          with_identity_insert_enabled(id_insert_table_name, conn) { internal_raw_execute(sql, conn, perform_do: true) }
                        else
                          internal_raw_execute(sql, conn, perform_do: true)
@@ -67,13 +67,11 @@ module ActiveRecord
         end
 
         def exec_delete(sql, name, binds)
-          sql = sql.dup << "; SELECT @@ROWCOUNT AS AffectedRows"
-          super(sql, name, binds).rows.first.first
+          super.rows.first.try(:first) || super("SELECT @@ROWCOUNT As AffectedRows", "", []).rows.first.try(:first)
         end
 
         def exec_update(sql, name, binds)
-          sql = sql.dup << "; SELECT @@ROWCOUNT AS AffectedRows"
-          super(sql, name, binds).rows.first.first
+          super.rows.first.try(:first) || super("SELECT @@ROWCOUNT As AffectedRows", "", []).rows.first.try(:first)
         end
 
         def begin_db_transaction
@@ -173,11 +171,17 @@ module ActiveRecord
                  else
                    variables.map { |v| quote(v) }
                  end.join(", ")
+
           sql = "EXEC #{proc_name} #{vars}".strip
 
           log(sql, "Execute Procedure") do |notification_payload|
             with_raw_connection do |conn|
-              result = internal_raw_execute(sql, conn)
+              if odbc_connection?(conn)
+                result = execute_odbc_procedure(sql, conn)
+              else
+                result = internal_raw_execute(sql, conn)
+              end
+
               verified!
               options = { as: :hash, cache_rows: true, timezone: ActiveRecord.default_timezone || :utc }
 
@@ -288,9 +292,11 @@ module ActiveRecord
                     end
 
                     <<~SQL.squish
+                      SET NOCOUNT ON
                       DECLARE @ssaIdInsertTable table (#{pk_and_types.map { |pk_and_type| "#{pk_and_type[:quoted]} #{pk_and_type[:id_sql_type]}"}.join(", ") });
                       #{sql.dup.insert sql.index(/ (DEFAULT )?VALUES/i), " OUTPUT #{ pk_and_types.map { |pk_and_type| "INSERTED.#{pk_and_type[:quoted]}" }.join(", ") } INTO @ssaIdInsertTable"}
                       SELECT #{pk_and_types.map {|pk_and_type| "CAST(#{pk_and_type[:quoted]} AS #{pk_and_type[:id_sql_type]}) #{pk_and_type[:quoted]}"}.join(", ")} FROM @ssaIdInsertTable
+                      SET NOCOUNT OFF
                     SQL
                   else
                     returning_columns = returning || Array(pk)
@@ -303,7 +309,13 @@ module ActiveRecord
                     end
                   end
                 else
-                  "#{sql}; SELECT CAST(SCOPE_IDENTITY() AS bigint) AS Ident"
+                  table = get_table_name(sql)
+                  id_column = identity_columns(table.to_s.strip).first
+                  if !id_column.blank?
+                    sql.sub(/\s*VALUES\s*\(/, " OUTPUT INSERTED.#{id_column.name} VALUES (")
+                  else
+                    sql.sub(/\s*VALUES\s*\(/, " OUTPUT CAST(SCOPE_IDENTITY() AS bigint) AS Ident VALUES (")
+                  end
                 end
 
           [sql, binds]
@@ -429,7 +441,45 @@ module ActiveRecord
           finish_statement_handle(handle)
         end
 
+        def execute_odbc_procedure(sql, conn)
+          results = []
+          raw_connection_run(sql, conn) do |handle|
+            get_rows = lambda do
+              rows = handle_to_names_and_values(handle, fetch: :all)
+              rows.each_with_index { |r, i| rows[i] = r.with_indifferent_access }
+              results << rows
+            end
+            get_rows.call
+            get_rows.call while handle_more_results?(handle)
+          end
+          results.many? ? results : results.first
+        end
+
+        # Wrapper for raw_connection's run method
+        def raw_connection_run(sql, conn)
+          conn.raw_connection.run(sql) do |handle|
+            yield(handle)
+          end
+        end
+
+        def handle_more_results?(handle)
+          case @config[:mode].to_sym
+          when :dblib
+          when :odbc
+            handle.more_results
+          end
+        end
+
         def handle_to_names_and_values(handle, options = {})
+          case @config[:mode].to_sym
+          when :dblib
+            handle_to_names_and_values_dblib(handle, options)
+          when :odbc
+            handle_to_names_and_values_odbc(handle, options)
+          end
+        end
+
+        def handle_to_names_and_values_dblib(handle, options = {})
           query_options = {}.tap do |qo|
             qo[:timezone] = ActiveRecord.default_timezone || :utc
             qo[:as] = (options[:ar_result] || options[:fetch] == :rows) ? :array : :hash
@@ -444,8 +494,30 @@ module ActiveRecord
           options[:ar_result] ? ActiveRecord::Result.new(columns, results) : results
         end
 
+        def handle_to_names_and_values_odbc(handle, options = {})
+          @raw_connection.use_utc = ActiveRecord.default_timezone == :utc
+
+          if options[:ar_result]
+            columns = lowercase_schema_reflection ? handle.columns(true).map { |c| c.name.downcase } : handle.columns(true).map { |c| c.name }
+            rows = handle.fetch_all || []
+            ActiveRecord::Result.new(columns, rows)
+          else
+            case options[:fetch]
+            when :all
+              handle.each_hash || []
+            when :rows
+              handle.fetch_all || []
+            end
+          end
+        end
+
         def finish_statement_handle(handle)
-          handle.cancel if handle
+          case @config[:mode].to_sym
+          when :dblib
+            handle.cancel if handle
+          when :odbc
+            handle.drop if handle && handle.respond_to?(:drop) && !handle.finished?
+          end
           handle
         end
 
@@ -453,11 +525,19 @@ module ActiveRecord
         # Getting around this by raising an exception ourselves while PR
         # https://github.com/rails-sqlserver/tiny_tds/pull/469 is not released.
         def internal_raw_execute(sql, conn, perform_do: false)
-          result = conn.execute(sql).tap do |_result|
-            raise TinyTds::Error, "failed to execute statement" if _result.is_a?(FalseClass)
-          end
+          if odbc_connection?(conn)
+            conn.do(sql)
+          else
+            result = conn.execute(sql).tap do |_result|
+              raise TinyTds::Error, "failed to execute statement" if _result.is_a?(FalseClass)
+            end
 
-          perform_do ? result.do : result
+            perform_do ? result.do : result
+          end
+        end
+
+        def odbc_connection?(connection)
+          connection.is_a?(ODBC::Database)
         end
       end
     end
