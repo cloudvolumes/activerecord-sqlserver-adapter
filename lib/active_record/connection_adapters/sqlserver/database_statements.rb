@@ -16,7 +16,7 @@ module ActiveRecord
         def raw_execute(sql, name, async: false, allow_retry: false, materialize_transactions: true)
           log(sql, name, async: async) do |notification_payload|
             with_raw_connection(allow_retry: allow_retry, materialize_transactions: materialize_transactions) do |conn|
-              result = if id_insert_table_name = query_requires_identity_insert?(sql)
+              result = if (id_insert_table_name = query_requires_identity_insert?(sql))
                          with_identity_insert_enabled(id_insert_table_name, conn) { internal_raw_execute(sql, conn, perform_do: true) }
                        else
                          internal_raw_execute(sql, conn, perform_do: true)
@@ -174,7 +174,7 @@ module ActiveRecord
 
           sql = "EXEC #{proc_name} #{vars}".strip
 
-          log(sql, "Execute Procedure") do |notification_payload|            
+          log(sql, "Execute Procedure") do |notification_payload|
             with_raw_connection do |conn|
               if odbc_connection?(conn)
                 result = execute_odbc_procedure(sql, conn)
@@ -461,7 +461,7 @@ module ActiveRecord
             yield(handle)
           end
         end
-        
+
         def handle_more_results?(handle)
           case @config[:mode].to_sym
           when :dblib
@@ -495,7 +495,8 @@ module ActiveRecord
         end
 
         def handle_to_names_and_values_odbc(handle, options = {})
-          @connection.use_utc = ActiveRecord.default_timezone == :utc
+          @raw_connection.use_utc = ActiveRecord.default_timezone == :utc
+
           if options[:ar_result]
             columns = lowercase_schema_reflection ? handle.columns(true).map { |c| c.name.downcase } : handle.columns(true).map { |c| c.name }
             rows = handle.fetch_all || []
@@ -535,8 +536,8 @@ module ActiveRecord
           end
         end
 
-        def odbc_connection?(conn)
-          conn.adapter_name.downcase.include?("odbc")
+        def odbc_connection?(connection)
+          connection.is_a?(ODBC::Database)
         end
       end
     end

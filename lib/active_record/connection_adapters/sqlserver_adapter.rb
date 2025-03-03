@@ -110,6 +110,7 @@ module ActiveRecord
             end
             ODBC::Database.new.drvconnect(driver)
           else
+            puts config
             ODBC.connect config[:dsn], config[:username], config[:password]
           end.tap do |c|
             begin
@@ -565,8 +566,6 @@ module ActiveRecord
         config[:encoding].present? ? config[:encoding] : nil
       end
 
-      def configure_connection; end
-
       def configure_application_name; end
 
       def initialize_dateformatter
@@ -607,20 +606,22 @@ module ActiveRecord
       end
 
       def configure_connection
-        if @config[:azure]
-          @raw_connection.execute("SET ANSI_NULLS ON").do
-          @raw_connection.execute("SET ANSI_NULL_DFLT_ON ON").do
-          @raw_connection.execute("SET ANSI_PADDING ON").do
-          @raw_connection.execute("SET ANSI_WARNINGS ON").do
-        else
-          @raw_connection.execute("SET ANSI_DEFAULTS ON").do
-        end
+        unless @config[:mode] == 'odbc'
+          if @config[:azure]
+            @raw_connection.execute("SET ANSI_NULLS ON").do
+            @raw_connection.execute("SET ANSI_NULL_DFLT_ON ON").do
+            @raw_connection.execute("SET ANSI_PADDING ON").do
+            @raw_connection.execute("SET ANSI_WARNINGS ON").do
+          else
+            @raw_connection.execute("SET ANSI_DEFAULTS ON").do
+          end
 
-        @raw_connection.execute("SET QUOTED_IDENTIFIER ON").do
-        @raw_connection.execute("SET CURSOR_CLOSE_ON_COMMIT OFF").do
-        @raw_connection.execute("SET IMPLICIT_TRANSACTIONS OFF").do
-        @raw_connection.execute("SET TEXTSIZE 2147483647").do
-        @raw_connection.execute("SET CONCAT_NULL_YIELDS_NULL ON").do
+          @raw_connection.execute("SET QUOTED_IDENTIFIER ON").do
+          @raw_connection.execute("SET CURSOR_CLOSE_ON_COMMIT OFF").do
+          @raw_connection.execute("SET IMPLICIT_TRANSACTIONS OFF").do
+          @raw_connection.execute("SET TEXTSIZE 2147483647").do
+          @raw_connection.execute("SET CONCAT_NULL_YIELDS_NULL ON").do
+        end
 
         @spid = _raw_select("SELECT @@SPID", @raw_connection).first.first
 
