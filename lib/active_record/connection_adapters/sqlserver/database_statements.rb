@@ -298,7 +298,14 @@ module ActiveRecord
                     end
                   end
                 else
-                  "#{sql}; SELECT CAST(SCOPE_IDENTITY() AS bigint) AS Ident"
+                  table = get_table_name(sql)
+                  id_column = identity_columns(table.to_s.strip).first
+
+                  if id_column.present?
+                    sql.sub(/\s*VALUES\s*\(/, " OUTPUT INSERTED.#{id_column.name} VALUES (")
+                  else
+                    sql.sub(/\s*VALUES\s*\(/, " OUTPUT CAST(SCOPE_IDENTITY() AS bigint) AS Ident VALUES (")
+                  end
                 end
 
           [sql, binds]
