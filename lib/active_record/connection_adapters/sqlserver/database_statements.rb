@@ -60,13 +60,11 @@ module ActiveRecord
         end
 
         def exec_delete(sql, name = nil, binds = [])
-          sql = sql.dup << "; SELECT @@ROWCOUNT AS AffectedRows"
-          super(sql, name, binds)
+          super(sql, name, binds) || super("SELECT @@ROWCOUNT As AffectedRows", "", [])
         end
 
         def exec_update(sql, name = nil, binds = [])
-          sql = sql.dup << "; SELECT @@ROWCOUNT AS AffectedRows"
-          super(sql, name, binds)
+          super(sql, name, binds) || super("SELECT @@ROWCOUNT As AffectedRows", "", [])
         end
 
         def begin_db_transaction
