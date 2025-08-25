@@ -4,6 +4,7 @@ require "tiny_tds"
 require "base64"
 require "active_record"
 require "active_record/connection_adapters/statement_pool"
+require "odbc_utf8"
 require "arel_sqlserver"
 require "active_record/connection_adapters/sqlserver/core_ext/active_record"
 require "active_record/connection_adapters/sqlserver/core_ext/explain"
@@ -81,9 +82,52 @@ module ActiveRecord
         end
 
         def new_client(config)
+          case config[:mode].to_sym
+          when :dblib
+            dblib_connect(config)
+          when :odbc
+            odbc_connect(config)
+          else
+            raise ArgumentError, "Unknown connection mode in #{config.inspect}."
+          end
+        end
+
+        def dblib_connect(config)
+          require "tiny_tds"
+
           TinyTds::Client.new(config)
         rescue TinyTds::Error => error
           if error.message.match(/database .* does not exist/i)
+            raise ActiveRecord::NoDatabaseError
+          else
+            raise
+          end
+        end
+
+        def odbc_connect(config)
+          raise ArgumentError, "Missing :dsn configuration." unless config.key?(:dsn)
+          require "odbc"
+          require "active_record/connection_adapters/sqlserver/core_ext/odbc"
+
+          if config[:dsn].include?(';')
+            driver = ODBC::Driver.new.tap do |d|
+              d.name = config[:dsn_name] || 'Driver1'
+              d.attrs = config[:dsn].split(';').map { |atr| atr.split('=') }.reject { |kv| kv.size != 2 }.reduce({}) { |a, e| k, v = e ; a[k] = v ; a }
+            end
+
+            ODBC::Database.new.drvconnect(driver)
+          else
+            ODBC.connect config[:dsn], config[:username], config[:password]
+          end.tap do |c|
+            begin
+              c.use_time = true
+              c.use_utc = ActiveRecord.default_timezone || :utc
+            rescue Exception
+              warn 'Ruby ODBC v0.99992 or higher is required.'
+            end
+          end
+        rescue ODBC::Error => e
+          if e.message.match(/database .* does not exist/i)
             raise ActiveRecord::NoDatabaseError
           else
             raise
@@ -100,7 +144,7 @@ module ActiveRecord
       def initialize(...)
         super
 
-        @config[:tds_version] = "7.3" unless @config[:tds_version]
+        @config[:tds_version] ||= "7.3" if @config[:mode].to_sym == :dblib
         @config[:appname] = self.class.rails_application_name unless @config[:appname]
         @config[:login_timeout] = @config[:login_timeout].present? ? @config[:login_timeout].to_i : nil
         @config[:timeout] = @config[:timeout].present? ? @config[:timeout].to_i / 1000 : nil
@@ -238,13 +282,28 @@ module ActiveRecord
       # === Abstract Adapter (Connection Management) ================== #
 
       def active?
-        @raw_connection&.active?
+        return false unless @raw_connection
+
+        @connection_parameters[:mode].to_sym == :dblib ? @raw_connection.active? : odbc_connection_active?
+      rescue *connection_errors
+        false
+      end
+
+      def odbc_connection_active?
+        @raw_connection.do("SELECT 1")
+        true
       rescue *connection_errors
         false
       end
 
       def reconnect
-        @raw_connection&.close rescue nil
+        case @connection_parameters[:mode].to_sym
+        when :dblib
+          @raw_connection&.close rescue nil
+        when :odbc
+          @raw_connection&.disconnect rescue nil
+        end
+
         @raw_connection = nil
         @spid = nil
         @collation = nil
@@ -255,7 +314,13 @@ module ActiveRecord
       def disconnect!
         super
 
-        @raw_connection&.close rescue nil
+        case @connection_parameters[:mode].to_sym
+        when :dblib
+          @raw_connection&.close rescue nil
+        when :odbc
+          @raw_connection&.disconnect rescue nil
+        end
+
         @raw_connection = nil
         @spid = nil
         @collation = nil
@@ -462,6 +527,7 @@ module ActiveRecord
       def connection_errors
         @raw_connection_errors ||= [].tap do |errors|
           errors << TinyTds::Error if defined?(TinyTds::Error)
+          errors << ODBC::Error if defined?(ODBC::Error)
         end
       end
 
@@ -503,6 +569,15 @@ module ActiveRecord
       end
 
       def configure_connection
+        send("configure_#{@config[:mode]}_connection")
+
+        @spid = _raw_select("SELECT @@SPID", @raw_connection).first.first
+
+        initialize_dateformatter
+        use_database
+      end
+
+      def configure_dblib_connection
         if @config[:azure]
           @raw_connection.execute("SET ANSI_NULLS ON").do
           @raw_connection.execute("SET ANSI_NULL_DFLT_ON ON").do
@@ -517,11 +592,29 @@ module ActiveRecord
         @raw_connection.execute("SET IMPLICIT_TRANSACTIONS OFF").do
         @raw_connection.execute("SET TEXTSIZE 2147483647").do
         @raw_connection.execute("SET CONCAT_NULL_YIELDS_NULL ON").do
+      end
 
-        @spid = _raw_select("SELECT @@SPID", @raw_connection).first.first
+      def configure_odbc_connection
+        if @config[:azure]
+          @raw_connection.do("SET ANSI_NULLS ON")
+          @raw_connection.do("SET ANSI_NULL_DFLT_ON ON")
+          @raw_connection.do("SET ANSI_PADDING ON")
+          @raw_connection.do("SET ANSI_WARNINGS ON")
+        else
+          @raw_connection.do("SET ANSI_DEFAULTS ON")
+        end
 
-        initialize_dateformatter
-        use_database
+        @raw_connection.do("SET QUOTED_IDENTIFIER ON")
+        @raw_connection.do("SET CURSOR_CLOSE_ON_COMMIT OFF")
+        @raw_connection.do("SET IMPLICIT_TRANSACTIONS OFF")
+        @raw_connection.do("SET TEXTSIZE 2147483647")
+        @raw_connection.do("SET CONCAT_NULL_YIELDS_NULL ON")
+
+        # Moved from AVM initializer to this location to avoid conflicts.
+        # Prior to Rails 7.2.0, `configure_connection` was an empty method.
+        # Keeping this method in the AVM initializer now leads to confusion.
+        # To avoid such ambiguity, the AVM-specific change is added here directly.
+        @raw_connection.do("SET LOCK_TIMEOUT 45000")
       end
     end
   end

@@ -1,3 +1,9 @@
+## v8.0.3.odbc
+
+#### Added
+
+- ODBC restoration.
+
 ## v8.0.3
 
 #### Fixed
